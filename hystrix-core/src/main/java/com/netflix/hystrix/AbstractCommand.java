@@ -161,9 +161,17 @@ import java.util.concurrent.atomic.AtomicReference;
 
         this.commandGroup = initGroupKey(group);
         this.commandKey = initCommandKey(key, getClass());
+
+        /**
+         * properties(HystrixCommandProperties) 中的属性记录了 Hystrix 各个"组件"的参数
+         * 一般情况下会构建 {@link com.netflix.hystrix.strategy.properties.HystrixPropertiesCommandDefault} 类型的实例
+         * 最终调用到 {@link HystrixCommandProperties#HystrixCommandProperties(HystrixCommandKey, HystrixCommandProperties.Setter, String)}
+         * 我们可以自己指定属性值，如果不指定的话，会有默认值被设置（每一个属性中，自己指定的值和默认值构建了一条链）
+         */
         this.properties = initCommandProperties(this.commandKey, propertiesStrategy, commandPropertiesDefaults);
         this.threadPoolKey = initThreadPoolKey(threadPoolKey, this.commandGroup, this.properties.executionIsolationThreadPoolKeyOverride().get());
         this.metrics = initMetrics(metrics, this.commandGroup, this.threadPoolKey, this.commandKey, this.properties);
+        // 初始化断路器
         this.circuitBreaker = initCircuitBreaker(this.properties.circuitBreakerEnabled().get(), circuitBreaker, this.commandGroup, this.commandKey, this.properties, this.metrics);
         this.threadPool = initThreadPool(threadPool, this.threadPoolKey, threadPoolPropertiesDefaults);
 
@@ -411,6 +419,7 @@ import java.util.concurrent.atomic.AtomicReference;
             }
         };
 
+        // 提交执行 command，将 command 执行结果封装成 Observable。 这里就涉及到了线程池隔离的策略
         final Func0<Observable<R>> applyHystrixSemantics = new Func0<Observable<R>>() {
             @Override
             public Observable<R> call() {
@@ -521,9 +530,14 @@ import java.util.concurrent.atomic.AtomicReference;
         executionHook.onStart(_cmd);
 
         /* determine if we're allowed to execute */
+        /* 判断断路器的状态，是否允许请求执行 */
         if (circuitBreaker.attemptExecution()) {
+            // 与信号量相关的对象：当线程隔离策略为信号量模式时，返回的对象是可以判断出是否允许请求继续执行；
+            // 而线程隔离策略不是信号量模式的时候，允许所有请求执行
             final TryableSemaphore executionSemaphore = getExecutionSemaphore();
             final AtomicBoolean semaphoreHasBeenReleased = new AtomicBoolean(false);
+
+            // 释放信号量的 Action0，应该是在任务执行完（成功或失败）后被执行
             final Action0 singleSemaphoreRelease = new Action0() {
                 @Override
                 public void call() {
@@ -533,6 +547,7 @@ import java.util.concurrent.atomic.AtomicReference;
                 }
             };
 
+            // 抛出异常的 Action1，当抛出异常的时候被执行
             final Action1<Throwable> markExceptionThrown = new Action1<Throwable>() {
                 @Override
                 public void call(Throwable t) {
@@ -540,18 +555,24 @@ import java.util.concurrent.atomic.AtomicReference;
                 }
             };
 
+            // 如果线程隔离策略是信号量模式，会判断是否超出并发上限，超出限制 tryAcquire 返回false；
+            // 如果线程隔离策略不是信号量模式，始终返回true
             if (executionSemaphore.tryAcquire()) {
                 try {
                     /* used to track userThreadExecutionTime */
                     executionResult = executionResult.setInvocationStartTime(System.currentTimeMillis());
+                    // executeCommandAndObserve 方法就是在执行 command，即用户代码
                     return executeCommandAndObserve(_cmd)
                             .doOnError(markExceptionThrown)
+                            // doOnTerminate 不论是正常还是异常情况下都会被执行，且要早于 Subscriber 的 onComplete 或 onError 执行
                             .doOnTerminate(singleSemaphoreRelease)
+                            // 取消订阅的时候同样执行了释放信号量的操作，但应该是兜底操作
                             .doOnUnsubscribe(singleSemaphoreRelease);
                 } catch (RuntimeException e) {
                     return Observable.error(e);
                 }
             } else {
+                // 如果超出信号量模式下的并发上限，则执行 getFallback 方法
                 return handleSemaphoreRejectionViaFallback();
             }
         } else {
@@ -599,9 +620,11 @@ import java.util.concurrent.atomic.AtomicReference;
             }
         };
 
+        // 降级处理 - 调用 getFallback 方法
         final Func1<Throwable, Observable<R>> handleFallback = new Func1<Throwable, Observable<R>>() {
             @Override
             public Observable<R> call(Throwable t) {
+                // 打开断路器
                 circuitBreaker.markNonSuccess();
                 Exception e = getExceptionFromThrowable(t);
                 executionResult = executionResult.setExecutionException(e);
@@ -619,7 +642,7 @@ import java.util.concurrent.atomic.AtomicReference;
                         eventNotifier.markEvent(HystrixEventType.BAD_REQUEST, commandKey);
                         return Observable.error(e);
                     }
-
+                    // 执行 getFallback 方法
                     return handleFailureViaFallback(e);
                 }
             }
@@ -633,6 +656,7 @@ import java.util.concurrent.atomic.AtomicReference;
         };
 
         Observable<R> execution;
+        // 如果 execution.timeout.enabled 为 true（默认为 true），则会通过 HystrixObservableTimeoutOperator 进行转换
         if (properties.executionTimeoutEnabled().get()) {
             execution = executeCommandWithSpecifiedIsolation(_cmd)
                     .lift(new HystrixObservableTimeoutOperator<R>(_cmd));
@@ -647,12 +671,14 @@ import java.util.concurrent.atomic.AtomicReference;
     }
 
     private Observable<R> executeCommandWithSpecifiedIsolation(final AbstractCommand<R> _cmd) {
+        // 如果是线程池隔离，在这个 if 中处理
         if (properties.executionIsolationStrategy().get() == ExecutionIsolationStrategy.THREAD) {
             // mark that we are executing in a thread (even if we end up being rejected we still were a THREAD execution and not SEMAPHORE)
             return Observable.defer(new Func0<Observable<R>>() {
                 @Override
                 public Observable<R> call() {
                     executionResult = executionResult.setExecutionOccurred();
+                    // 执行前，通过 CAS 检查并修改状态，防止并发多次处理
                     if (!commandState.compareAndSet(CommandState.OBSERVABLE_CHAIN_CREATED, CommandState.USER_CODE_EXECUTED)) {
                         return Observable.error(new IllegalStateException("execution attempted while in state : " + commandState.get().name()));
                     }
@@ -666,9 +692,11 @@ import java.util.concurrent.atomic.AtomicReference;
                     }
                     if (threadState.compareAndSet(ThreadState.NOT_USING_THREAD, ThreadState.STARTED)) {
                         //we have not been unsubscribed, so should proceed
+                        // 这里记录的是全局的并发线程数（静态方法）
                         HystrixCounters.incrementGlobalConcurrentThreads();
                         threadPool.markThreadExecution();
                         // store the command that is being run
+                        // 记录当前执行的 Command。注意： 方法返回值是一个 Action0，该 Action0 的执行操作是在执行结束后，将执行完成的 Command 移除
                         endCurrentThreadExecutingCommand = Hystrix.startCurrentThreadExecutingCommand(getCommandKey());
                         executionResult = executionResult.setExecutedInThread();
                         /**
@@ -676,8 +704,10 @@ import java.util.concurrent.atomic.AtomicReference;
                          */
                         try {
                             executionHook.onThreadStart(_cmd);
+                            // onRunStart 已经被 onExecutionStart 代替，因此这里同时调用了 ExecutionHook 的这两个方法
                             executionHook.onRunStart(_cmd);
                             executionHook.onExecutionStart(_cmd);
+                            // 执行用户自定义 Command 中的 run 方法，并将结果做了几次转换
                             return getUserExecutionObservable(_cmd);
                         } catch (Throwable ex) {
                             return Observable.error(ex);
@@ -690,6 +720,7 @@ import java.util.concurrent.atomic.AtomicReference;
             }).doOnTerminate(new Action0() {
                 @Override
                 public void call() {
+                    // 运行结束后，修改线程状态，并发线程数 -1，并调用 executionHook 相关方法
                     if (threadState.compareAndSet(ThreadState.STARTED, ThreadState.TERMINAL)) {
                         handleThreadEnd(_cmd);
                     }
@@ -709,17 +740,23 @@ import java.util.concurrent.atomic.AtomicReference;
                     }
                     //if it was terminal, then other cleanup handled it
                 }
-            }).subscribeOn(threadPool.getScheduler(new Func0<Boolean>() {
+            })
+            // subscribeOn 是用来指定 Command 运行的线程的
+            .subscribeOn(threadPool.getScheduler(new Func0<Boolean>() {
                 @Override
                 public Boolean call() {
+                    // executionIsolationThreadInterruptOnTimeout 是用来指定当线程超时的时候，是否要打断线程，最终会被用于 Future#cancel 方法
+                    // 参考 ThreadPoolWorker
                     return properties.executionIsolationThreadInterruptOnTimeout().get() && _cmd.isCommandTimedOut.get() == TimedOutStatus.TIMED_OUT;
                 }
             }));
         } else {
+            // 非线程池隔离，即信号量隔离
             return Observable.defer(new Func0<Observable<R>>() {
                 @Override
                 public Observable<R> call() {
                     executionResult = executionResult.setExecutionOccurred();
+                    // 执行前，通过 CAS 检查并修改状态，防止并发多次处理
                     if (!commandState.compareAndSet(CommandState.OBSERVABLE_CHAIN_CREATED, CommandState.USER_CODE_EXECUTED)) {
                         return Observable.error(new IllegalStateException("execution attempted while in state : " + commandState.get().name()));
                     }
@@ -851,8 +888,10 @@ import java.util.concurrent.atomic.AtomicReference;
                 // acquire a permit
                 if (fallbackSemaphore.tryAcquire()) {
                     try {
+                        // 判断用户是否自定义了 getFallback 方法
                         if (isFallbackUserDefined()) {
                             executionHook.onFallbackStart(this);
+                            // getFallbackObservable() 方法即是执行用户定义的 getFallback 方法，返回 Observable 对象
                             fallbackExecutionChain = getFallbackObservable();
                         } else {
                             //same logic as above without the hook invocation
@@ -885,13 +924,16 @@ import java.util.concurrent.atomic.AtomicReference;
         Observable<R> userObservable;
 
         try {
+            // 调用用户自定义的 run 方法，并通过 Observable#just 方法封装后返回
             userObservable = getExecutionObservable();
         } catch (Throwable ex) {
             // the run() method is a user provided implementation so can throw instead of using Observable.onError
             // so we catch it here and turn it into Observable.error
+            // 执行 run 方法如果抛出异常（注意：捕获的是 Throwable），则通过 Observable#error 返回
             userObservable = Observable.error(ex);
         }
 
+        // 调用结果后的两个 lift 操作都是在调用 HystrixCommandExecutionHook 相关的方法（如果有异常的话，会把 Throwable 封装成 Exception）
         return userObservable
                 .lift(new ExecutionHookApplication(_cmd))
                 .lift(new DeprecatedOnRunHookApplication(_cmd));
@@ -1119,6 +1161,13 @@ import java.util.concurrent.atomic.AtomicReference;
         return false;
     }
 
+    /**
+     * {@link HystrixObservableTimeoutOperator} 会通过一个 {@link TimerListener} 来检查 Command 是否超时
+     * 而 {@link TimerListener} 是被 {@link HystrixTimer} 内部的一个 {@link java.util.concurrent.ScheduledExecutorService}
+     * 定时触发的，定时时间就是超时时间。
+     * 如果 TimerListener#tick() 方法被触发的时候， Command 未执行完成（isCommandTimedOut状态没有变为 COMPLETED），则会被置为 TIMED_OUT
+     * @see HystrixTimer#addTimerListener(TimerListener) 这方法会初始化 {@link java.util.concurrent.ScheduledExecutorService}
+     */
     private static class HystrixObservableTimeoutOperator<R> implements Operator<R, R> {
 
         final AbstractCommand<R> originalCommand;
@@ -1142,6 +1191,7 @@ import java.util.concurrent.atomic.AtomicReference;
                 public void tick() {
                     // if we can go from NOT_EXECUTED to TIMED_OUT then we do the timeout codepath
                     // otherwise it means we lost a race and the run() execution completed or did not start
+                    // 如上英文注释所说：如果 isCommandTimedOut 可以通过CAS 设置为 TIMED_OUT，说明方法已经超时了，不然的话就是已经完成，不用触发超时操作
                     if (originalCommand.isCommandTimedOut.compareAndSet(TimedOutStatus.NOT_EXECUTED, TimedOutStatus.TIMED_OUT)) {
                         // report timeout failure
                         originalCommand.eventNotifier.markEvent(HystrixEventType.TIMEOUT, originalCommand.commandKey);
@@ -1204,6 +1254,10 @@ import java.util.concurrent.atomic.AtomicReference;
                     }
                 }
 
+                /**
+                 * 该方法只在 parent 这个 Subscriber 中被调用，而 onNext()、 onCompleted() 或 onError() 被执行到的时候，
+                 * 用户方法一定是执行完成的，因此这个方法里尝试将 isCommandTimedOut 设置为 COMPLETED，设置成功表示未超时。
+                 */
                 private boolean isNotTimedOut() {
                     // if already marked COMPLETED (by onNext) or succeeds in setting to COMPLETED
                     return originalCommand.isCommandTimedOut.get() == TimedOutStatus.COMPLETED ||
@@ -1338,6 +1392,10 @@ import java.util.concurrent.atomic.AtomicReference;
     /* ******************************************************************************** */
     /* ******************************************************************************** */
 
+    /**
+     * ExecutionHookApplication 只是在各个阶段调用了 {@link this#executionHook} 的相关方法，如果用户未自定义 HystrixCommandExecutionHook，则基本没什么影响
+     * HystrixCommandExecutionHook 为 Command 各个阶段的执行定义的相关的钩子方法，可以对结果进行有限范围的处理。
+     */
     private class ExecutionHookApplication implements Operator<R, R> {
         private final HystrixInvokable<R> cmd;
 
@@ -1489,6 +1547,7 @@ import java.util.concurrent.atomic.AtomicReference;
     }
 
     private Exception wrapWithOnExecutionErrorHook(Throwable t) {
+        // 将 t 强制转换成了 Exception，如果是非 Exception 类型，则直接封装成了 Exception
         Exception e = getExceptionFromThrowable(t);
         try {
             return executionHook.onExecutionError(this, e);
@@ -1658,6 +1717,11 @@ import java.util.concurrent.atomic.AtomicReference;
 
     }
 
+    /**
+     * Hystrix 自定义的信号量接口，只是方法名与 Semaphore 相同，但实现却非常简单
+     * @see TryableSemaphoreActual
+     * @see TryableSemaphoreNoOp
+     */
     /* package */static interface TryableSemaphore {
 
         /**

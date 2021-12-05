@@ -126,6 +126,7 @@ public class HystrixContextScheduler extends Scheduler {
     }
 
     /**
+     * RxJava 并不支持ThreadPoolWorker，Hystrix 自定义了此类型的 Worker
      * Purely for scheduling work on a thread-pool.
      * <p>
      * This is not natively supported by RxJava as of 0.18.0 because thread-pools
@@ -175,6 +176,9 @@ public class HystrixContextScheduler extends Scheduler {
             return sa;
         }
 
+        /**
+         * Hystrix 不支持延迟执行
+         */
         @Override
         public Subscription schedule(Action0 action, long delayTime, TimeUnit unit) {
             throw new IllegalStateException("Hystrix does not support delayed scheduling");

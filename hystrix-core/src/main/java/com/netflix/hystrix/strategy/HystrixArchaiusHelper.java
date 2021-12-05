@@ -66,6 +66,7 @@ class HystrixArchaiusHelper {
     }
 
     /**
+     * 通过 {@link ClassLoader#getResource(String)} 方式从 hystrix-plugins.properties 中加载配置
      * @ExcludeFromJavadoc
      */
     static HystrixDynamicProperties createArchaiusDynamicProperties() {

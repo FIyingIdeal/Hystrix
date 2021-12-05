@@ -236,6 +236,7 @@ public interface HystrixCircuitBreaker {
 
         @Override
         public boolean allowRequest() {
+            // ForceOpen 情况下，返回 false，即 OPEN 状态下不接受请求
             if (properties.circuitBreakerForceOpen().get()) {
                 return false;
             }
@@ -245,6 +246,15 @@ public interface HystrixCircuitBreaker {
             if (circuitOpened.get() == -1) {
                 return true;
             } else {
+                /**
+                 * 到这里 status 只会有 HALF_OPEN 和 OPEN 两个状态。因为 if (circuitOpened.get() == -1) 表示的就是 CLOSE 状态
+                 *
+                 * 在 {@link this#markSuccess()} 的时候（即将断路器打开）会将 circuitOpened 设置为 -1；
+                 * 在 {@link this#markNonSuccess()} 的时候（即将断路器关闭）会将 circuitOpened 设置为 System.currentTimeMillis()
+                 *
+                 * TODO 为什么半开状态下直接返回 false，而不是调用 isAfterSleepWindow()。
+                 *      可能是通过 {@link this#attemptExecution()} 来设置的，调用这个方法的地方限制了只允许超过等待时间的第一个请求来尝试执行
+                 */
                 if (status.get().equals(Status.HALF_OPEN)) {
                     return false;
                 } else {

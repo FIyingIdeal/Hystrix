@@ -1,6 +1,10 @@
 package com.netflix.hystrix.strategy.properties;
 
 /**
+ * 这个类其实是从系统属性中获取配置信息，即使用 {@link System#getProperty(String, String)} 获取配置
+ * 
+ * @see com.netflix.hystrix.strategy.HystrixPlugins#getPluginImplementationViaProperties(Class, HystrixDynamicProperties) 
+ * 
  * @ExcludeFromJavadoc
  * @author agent
  */
@@ -10,7 +14,10 @@ public final class HystrixDynamicPropertiesSystemProperties implements HystrixDy
      * Only public for unit test purposes.
      */
     public HystrixDynamicPropertiesSystemProperties() {}
-    
+
+    /**
+     * 静态内部类实现的单例模式，且可以实现延迟初始化，即在使用的时候才会初始化。单例的最优方案~
+     */
     private static class LazyHolder {
         private static final HystrixDynamicPropertiesSystemProperties INSTANCE = new HystrixDynamicPropertiesSystemProperties();
     }

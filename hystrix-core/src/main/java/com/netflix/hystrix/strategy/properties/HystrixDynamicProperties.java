@@ -15,9 +15,15 @@
  */
 package com.netflix.hystrix.strategy.properties;
 
+import com.netflix.hystrix.strategy.HystrixPlugins;
+
 import java.util.ServiceLoader;
 
 /**
+ * 在 {@link com.netflix.hystrix.strategy.HystrixPlugins} 实例化的时候就会确定具体使用哪一个 {@link HystrixDynamicProperties}
+ * 
+ * @see com.netflix.hystrix.strategy.HystrixPlugins#resolveDynamicProperties(ClassLoader, HystrixPlugins.LoggerSupplier) 
+ * 
  * A hystrix plugin (SPI) for resolving dynamic configuration properties. This
  * SPI allows for varying configuration sources.
  * 

@@ -54,6 +54,7 @@ public class HystrixPlugins {
     
     //We should not load unless we are requested to. This avoids accidental initialization. @agentgt
     //See https://en.wikipedia.org/wiki/Initialization-on-demand_holder_idiom
+    // 静态内部类：实例化 HystrixPlugins
     private static class LazyHolder { private static final HystrixPlugins INSTANCE = HystrixPlugins.create(); }
     private final ClassLoader classLoader;
     /* package */ final AtomicReference<HystrixEventNotifier> notifier = new AtomicReference<HystrixEventNotifier>();
@@ -63,7 +64,9 @@ public class HystrixPlugins {
     /* package */ final AtomicReference<HystrixCommandExecutionHook> commandExecutionHook = new AtomicReference<HystrixCommandExecutionHook>();
     private final HystrixDynamicProperties dynamicProperties;
 
-    
+    /**
+     * 私有构造方法，单例模式的标准之一。通过静态内部类 {@link LazyHolder} 构造单例，通过 {@link HystrixPlugins#getInstance()} 暴露该单例
+     */
     private HystrixPlugins(ClassLoader classLoader, LoggerSupplier logSupplier) {
         //This will load Archaius if its in the classpath.
         this.classLoader = classLoader;
@@ -361,11 +364,15 @@ public class HystrixPlugins {
             return null;
         }
     }
-    
-    
 
+
+    /**
+     * 实例化 {@link HystrixDynamicProperties}，即通过解析 系统环境变量/SPI接口/Archaius配置 来构造一个 {@link HystrixDynamicProperties} 实例
+     * 从代码的加载顺序来看，优先级如下：系统环境变量 > SPI > Archaius(hystrix-plugins.properties)
+     */
     private static HystrixDynamicProperties resolveDynamicProperties(ClassLoader classLoader, LoggerSupplier logSupplier) {
-        HystrixDynamicProperties hp = getPluginImplementationViaProperties(HystrixDynamicProperties.class, 
+        // 系统环境变量加载配置，读取的是 hystrix.plugin.HystrixDynamicProperties.implementation 这个环境变量
+        HystrixDynamicProperties hp = getPluginImplementationViaProperties(HystrixDynamicProperties.class,
                 HystrixDynamicPropertiesSystemProperties.getInstance());
         if (hp != null) {
             logSupplier.getLogger().debug(
@@ -374,6 +381,7 @@ public class HystrixPlugins {
                     hp.getClass().getCanonicalName());
             return hp;
         }
+        // 优先通过系统属性获取，如果系统属性中没有配置，则通过 SPI 加载
         hp = findService(HystrixDynamicProperties.class, classLoader);
         if (hp != null) {
             logSupplier.getLogger()
@@ -381,12 +389,14 @@ public class HystrixPlugins {
                             hp.getClass().getCanonicalName());
             return hp;
         }
+        // 通过 archaius 加载，本质是通过 {@link ClassLoader#getResource(String)} 方式从 hystrix-plugins.properties 中加载配置
         hp = HystrixArchaiusHelper.createArchaiusDynamicProperties();
         if (hp != null) {
             logSupplier.getLogger().debug("Created HystrixDynamicProperties. Using class : {}", 
                     hp.getClass().getCanonicalName());
             return hp;
         }
+        // 上述都加载不到，返回 HystrixDynamicPropertiesSystemProperties 的实例
         hp = HystrixDynamicPropertiesSystemProperties.getInstance();
         logSupplier.getLogger().info("Using System Properties for HystrixDynamicProperties! Using class: {}", 
                 hp.getClass().getCanonicalName());

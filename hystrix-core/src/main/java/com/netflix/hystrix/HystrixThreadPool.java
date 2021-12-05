@@ -169,6 +169,7 @@ public interface HystrixThreadPool {
         private final int queueSize;
 
         public HystrixThreadPoolDefault(HystrixThreadPoolKey threadPoolKey, HystrixThreadPoolProperties.Setter propertiesDefaults) {
+            // 收集线程池的参数，每一个参数都会构造一个 chain，如果用户参数为指定，会有默认的值来填充
             this.properties = HystrixPropertiesFactory.getThreadPoolProperties(threadPoolKey, propertiesDefaults);
             HystrixConcurrencyStrategy concurrencyStrategy = HystrixPlugins.getInstance().getConcurrencyStrategy();
             this.queueSize = properties.maxQueueSize().get();

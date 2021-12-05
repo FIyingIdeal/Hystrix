@@ -91,6 +91,8 @@ public class HystrixTimer {
         startThreadIfNeeded();
         // add the listener
 
+        // 定义 Runnable : 触发 TimerListener#tick() 方法
+        // 参考 AbstractCommand.HystrixObservableTimeoutOperator 类中定义的 TimerListener
         Runnable r = new Runnable() {
 
             @Override
@@ -103,6 +105,7 @@ public class HystrixTimer {
             }
         };
 
+        // 向 ScheduledExecutorService 提交触发 TimerListener#tick() 方法的任务
         ScheduledFuture<?> f = executor.get().getThreadPool().scheduleAtFixedRate(r, listener.getIntervalTimeInMilliseconds(), listener.getIntervalTimeInMilliseconds(), TimeUnit.MILLISECONDS);
         return new TimerReference(listener, f);
     }
@@ -133,6 +136,7 @@ public class HystrixTimer {
     protected void startThreadIfNeeded() {
         // create and start thread if one doesn't exist
         while (executor.get() == null || ! executor.get().isInitialized()) {
+            // 初始化 ScheduledExecutor，其内部包含一个 ScheduledThreadPoolExecutor，如果未被初始化，则会通过 initialize() 方法初始化
             if (executor.compareAndSet(null, new ScheduledExecutor())) {
                 // initialize the executor that we 'won' setting
                 executor.get().initialize();
@@ -150,6 +154,8 @@ public class HystrixTimer {
         public void initialize() {
 
             HystrixPropertiesStrategy propertiesStrategy = HystrixPlugins.getInstance().getPropertiesStrategy();
+            // timerThreadPoolProperties 对应的参数设置 key 是 hystrix.timer.threadpool.default.coreSize
+            // 参考 HystrixTimerThreadPoolProperties 中的设置，这个 coreSize 的默认值是CPU核数 - Runtime.getRuntime().availableProcessors()
             int coreSize = propertiesStrategy.getTimerThreadPoolProperties().getCorePoolSize().get();
 
             ThreadFactory threadFactory = null;
